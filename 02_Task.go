@@ -1,58 +1,45 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
+	"net/http"
 
 	"github.com/labstack/echo/v4"
 )
 
-// Data storage place
 type User struct {
-	key   string
-	value string
+	Name  string `json: "name"`
+	Email string `json: "email"`
 }
 
-// Handler
+var store = make(map[string]string)
 
-func send(c echo.Context) error {
-	key := c.QueryParam("key")
-	Data = c.Param("data")
-	if Data == "json" {
-		return c.JSON(http.StatusOK , map[string]string{ "Value" : data[key]}    )
+func handler_get(c echo.Context) error {
+	data := c.QueryParam("data")
+	return c.String(http.StatusOK, fmt.Sprintf("your %s :  %s", data, store[data]))
 
 }
 
+func handler_set(c echo.Context) error {
+	u := new(User)
+	err := c.Bind(u)
+	// Access JSON data
 
-
-func add(c echo.Context) error {
-	data := User{}
-
-	defer c.Request().Body.Close()
-	val, err := ioutil.ReadAll(c.Request().Body)
 	if err != nil {
-		return c.String("Error occured")
-	}
+		return c.String(http.StatusBadRequest, fmt.Sprintf("Bad data"))
 
-	final_data := json.Unmarshal(val, &data)
-	if final_data != nil {
-		return c.String("Error occured")
 	}
-	return c.String("Json data is stored")
+	store["email"] = u.Email
+	store["name"] = u.Name
+	return c.String(http.StatusOK, fmt.Sprintf("The data is stored ,Thanks for the data "))
 
 }
-
 
 func main() {
 
 	e := echo.New()
-	// To get the JSON DATA
-	e.GET("/get", send)
-
-	e.POST("/add", add)
+	e.GET("/get", handler_get)
+	e.POST("/post", handler_set)
 
 	e.Start(":3000")
-
-	//fmt.Println("hi this is keerthi Raja")
-
 }
