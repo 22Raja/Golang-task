@@ -6,18 +6,28 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-var key, value string
-var ttl int
-var dataStore map[string]string
-var command string
+var dataStore map[string]expirationData
+var mu sync.Mutex
 
-func kill(key string) {
-	time.Sleep(time.Second * time.Duration(ttl))
-	delete(dataStore, key)
+type expirationData struct {
+	value  string
+	expiry time.Time
+}
 
+func deleteExpiredKeys() {
+	for {
+		mu.Lock()
+		for key, expData := range dataStore {
+			if time.Now().After(expData.expiry) {
+				delete(dataStore, key)
+			}
+		}
+		mu.Unlock()
+	}
 }
 
 func handleConnection(conn net.Conn) {
@@ -44,7 +54,9 @@ func handleConnection(conn net.Conn) {
 			}
 			key := parts[1]
 			value := parts[2]
-			dataStore[key] = value
+			mu.Lock()
+			dataStore[key] = expirationData{value: value}
+			mu.Unlock()
 			fmt.Fprintln(conn, "THE KEY VALUE IS ADDED")
 		case command == "get":
 			if len(parts) != 2 {
@@ -52,38 +64,44 @@ func handleConnection(conn net.Conn) {
 				continue
 			}
 			key := parts[1]
-			value, ok := dataStore[key]
+			mu.Lock()
+			expData, ok := dataStore[key]
+			mu.Unlock()
 			if !ok {
 				fmt.Fprintln(conn, "The key is not present in the dictionary")
 				continue
 			}
-			fmt.Fprintln(conn, value)
-		//setex name 10 raja
+			fmt.Fprintln(conn, expData.value)
 		case command == "setex":
 			if len(parts) != 4 {
 				fmt.Fprintln(conn, "USE Syntax : SETEX key seconds value ")
 				continue
 			}
-			value = parts[3]
-			key = parts[1]
-			dataStore[key] = value
-			num, err := strconv.Atoi(parts[2])
+			key := parts[1]
+			value := parts[3]
+			expirySeconds, err := strconv.Atoi(parts[2])
 			if err != nil {
 				fmt.Println("Conversion failed:", err)
 				return
 			}
-			ttl = num
-			go kill(key)
-			fmt.Fprintln(conn, "THE KEY VALUE IS ADDED FOR ONLY ", num, "Seconds")
+			fmt.Print(time.Duration(expirySeconds) * time.Second)
+			expiryTime := time.Now().Add(time.Duration(expirySeconds) * time.Second)
+			fmt.Print(expiryTime)
 
+			mu.Lock()
+			dataStore[key] = expirationData{value: value, expiry: expiryTime}
+			mu.Unlock()
+			fmt.Fprintf(conn, "THE KEY VALUE IS ADDED FOR ONLY %d Seconds\n", expirySeconds)
 		default:
-			fmt.Fprintln(conn, "we have only SET AND GET METHOD")
+			fmt.Fprintln(conn, "we have only SET, GET, and SETEX methods")
 		}
 	}
 }
 
 func main() {
-	dataStore = make(map[string]string)
+	dataStore = make(map[string]expirationData)
+
+	go deleteExpiredKeys()
 
 	listener, err := net.Listen("tcp", ":6379")
 	if err != nil {
@@ -99,8 +117,7 @@ func main() {
 			fmt.Println("Error accepting connection:", err)
 			continue
 		}
-		fmt.Print(conn)
+		fmt.Println(conn)
 		go handleConnection(conn)
 	}
 }
-
