@@ -1,68 +1,221 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"net"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
-type Queue struct {
+var mu sync.Mutex
+
+type NewQueue struct {
 	items []string
-	mutex sync.Mutex
-	cond  *sync.Cond
 }
 
-func NewQueue() *Queue {
-	// It is to create an Object
-	q := &Queue{
-		items: make([]string, 0),
+type expirationData struct {
+	value  string
+	expiry time.Time
+}
+
+var dataStore map[string]expirationData
+
+var queue map[string]NewQueue
+var ch = make(chan string)
+
+func deleteExpiredKeys() {
+	for range time.Tick(10 * time.Second) {
+		mu.Lock()
+		for key, expData := range dataStore {
+			if !expData.expiry.IsZero() && time.Now().After(expData.expiry) {
+				delete(dataStore, key)
+			}
+		}
+		mu.Unlock()
 	}
-
-	q.cond = sync.NewCond(&q.mutex)
-	return q
 }
+func handleConnection(conn net.Conn) {
+	defer conn.Close()
 
-// It adds to the index.
-func (q *Queue) Push(item string) {
-	q.mutex.Lock()
-	defer q.mutex.Unlock()
-	// Adding to the list
-	q.items = append(q.items, item)
-	q.cond.Signal()
+	scanner := bufio.NewScanner(conn)
 
-}
+	for scanner.Scan() {
+		command := scanner.Text()
 
-// poping the elements.
-func (q *Queue) Pop(timeout time.Duration) string {
-	q.mutex.Lock()
-	defer q.mutex.Unlock()
+		parts := strings.Fields(command)
 
-	for len(q.items) == 0 {
-		q.cond.Wait()
+		if len(parts) < 2 {
+			fmt.Fprintln(conn, "Invalid command")
+			continue
+		}
+		command = strings.ToLower(parts[0])
+
+		switch {
+		case command == "set":
+			if len(parts) != 3 {
+				fmt.Fprintln(conn, "USE Syntax : SET key value")
+				continue
+			}
+			key := parts[1]
+			value := parts[2]
+			fmt.Println(key)
+			fmt.Println(value)
+
+			mu.Lock()
+			dataStore[key] = expirationData{value: value}
+			mu.Unlock()
+			fmt.Fprintln(conn, "THE KEY VALUE IS ADDED")
+		case command == "get":
+			if len(parts) != 2 {
+				fmt.Fprintln(conn, "USE Syntax : GET key")
+				continue
+			}
+			key := parts[1]
+			fmt.Println(key)
+			mu.Lock()
+			expData, ok := dataStore[key]
+			mu.Unlock()
+			if !ok {
+				fmt.Fprintln(conn, "The key is not present in the dictionary")
+				continue
+			}
+			fmt.Fprintln(conn, expData.value)
+		case command == "setex":
+			if len(parts) != 4 {
+				fmt.Fprintln(conn, "USE Syntax : SETEX key seconds value ")
+				continue
+			}
+			key := parts[1]
+			value := parts[3]
+			expirySeconds, err := strconv.Atoi(parts[2])
+			if err != nil {
+				fmt.Println("Conversion failed:", err)
+				return
+			}
+			fmt.Print(time.Duration(expirySeconds) * time.Second)
+			expiryTime := time.Now().Add(time.Duration(expirySeconds) * time.Second)
+			fmt.Print(expiryTime)
+
+			mu.Lock()
+			dataStore[key] = expirationData{value: value, expiry: expiryTime}
+			mu.Unlock()
+			fmt.Fprintf(conn, "THE KEY VALUE IS ADDED FOR ONLY %d Seconds\n", expirySeconds)
+		// lpush list name
+		case command == "lpush":
+			if len(parts) < 3 {
+				fmt.Fprintln(conn, "USE Syntax: LPUSH key value")
+				continue
+			}
+			key := parts[1]
+			value := parts[2]
+
+			mu.Lock()
+			ed, ok := queue[key]
+			if !ok {
+				ed = NewQueue{items: []string{value}}
+			} else {
+				ed.items = append(ed.items, value)
+			}
+			queue[key] = ed
+			fmt.Println(ed.items)
+
+			mu.Unlock()
+			fmt.Fprintln(conn, "ELEMENT ADDED TO LIST")
+		// blpop list 10
+		case command == "blpop":
+			if len(parts) != 3 {
+				fmt.Fprintln(conn, "USE Syntax: BLPOP key timeout")
+				continue
+			}
+			key := parts[1]
+			timeout, err := strconv.Atoi(parts[2])
+			if err != nil {
+				fmt.Fprintf(conn, "Invalid timeout value: %s\n", parts[2])
+				continue
+			}
+
+			mu.Lock()
+
+			list, exists := queue[key]
+			if !exists || len(list.items) == 0 {
+				go func() {
+					time.Sleep(time.Duration(timeout) * time.Second)
+					ch <- "nil"
+				}()
+			} else {
+				// Pop the first item from the list
+				item := list.items[0]
+				list.items = list.items[1:]
+				queue[key] = list
+				fmt.Fprintln(conn, item)
+				mu.Unlock()
+				continue
+			}
+			mu.Unlock()
+			select {
+			case item := <-ch:
+				fmt.Fprintln(conn, item)
+			}
+		// lrange mylist 0 -1
+		case command == "lrange":
+			if len(parts) != 4 {
+				fmt.Fprintln(conn, "USE Syntax: LRANGE key start stop")
+				continue
+			}
+			key := parts[1]
+			start, err := strconv.Atoi(parts[2])
+			stop, err := strconv.Atoi(parts[3])
+			if err != nil {
+				fmt.Fprintln(conn, "You have given wrong start or stop value")
+
+				continue
+			}
+
+			list, exists := queue[key]
+			total_len := len(list.items)
+			//if start > total_len || stop > total_len {
+			//	fmt.Fprintln(conn, "Queue doesn't have that much element")
+			//	continue
+
+			//}
+			if !exists || total_len == 0 {
+				fmt.Fprintln(conn, " The queue does not exist")
+			} else {
+				fmt.Fprintln(conn, list.items[start:stop])
+			}
+
+		default:
+			fmt.Fprintln(conn, "we have only SET, GET, and SETEX methods")
+
+		}
 	}
-	// printing the elements
-
-	item := q.items[0]
-	// changing the Index
-	q.items = q.items[1:]
-	return item
 }
 
 func main() {
-	queue := NewQueue()
+	dataStore = make(map[string]expirationData)
+	queue = make(map[string]NewQueue)
+	//ch = make(chan string)
 
-	go func() {
-		time.Sleep(2 * time.Second)
-		queue.Push("Raaja")
-		time.Sleep(1 * time.Second)
-		queue.Push("vinoth")
-	}()
+	go deleteExpiredKeys()
 
-	go func() {
-		for i := 0; i < 2; i++ {
-			fmt.Println("Printing:", queue.Pop(time.Second))
+	listener, err := net.Listen("tcp", ":6379")
+	if err != nil {
+		panic(err)
+	}
+	defer listener.Close()
+
+	fmt.Println("Redis clone listening on port 6379")
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			fmt.Println("Error accepting connection:", err)
+			continue
 		}
-	}()
-
-	time.Sleep(5 * time.Second)
+		fmt.Println(conn)
+		go handleConnection(conn)
+	}
 }
