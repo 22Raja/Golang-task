@@ -154,7 +154,7 @@ func handleConnection(conn net.Conn) {
 							ch <- list.items[0]
 							break
 						}
-						if time.Now().After(expiry) {
+						if time.Now().After(expiry) && timeout != 0 {
 							fmt.Println("hello")
 							ch <- "nil"
 							break
